@@ -4,6 +4,6 @@ bash scripts/setup_users.sh
 bash scripts/harden_ssh.sh
 bash scripts/harden_firewall.sh
 bash scripts/setup_fail2ban.sh
+bash scripts/setup_audit.sh
 bash scripts/deploy_omz.sh
 echo "System is now hardened and ready!"
-
