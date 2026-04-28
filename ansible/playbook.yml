@@ -1,0 +1,183 @@
+---
+- name: Server Hardening Lab - Security Suite
+  hosts: all
+  become: true
+  vars:
+    ssh_port: 2222
+    users:
+      - name: alice
+        groups: ["devs"]
+      - name: bob
+        groups: ["devs", "sysadmins"]
+    shared_dirs:
+      - path: /company/dev_scripts
+        owner: alice
+        group: devs
+        mode: '1770'  # Sticky bit + rwx for owner/group
+      - path: /company/server_backups
+        owner: root
+        group: sysadmins
+        mode: '0770'
+
+  tasks:
+    # 1. User & Group Management
+    - name: Ensure security groups exist
+      ansible.builtin.group:
+        name: "{{ item }}"
+        state: present
+      loop: [ "devs", "sysadmins" ]
+
+    - name: Create lab users
+      ansible.builtin.user:
+        name: "{{ item.name }}"
+        groups: "{{ item.groups }}"
+        shell: /bin/zsh
+        append: yes
+        password: "$6$UO.Pv6sczD6nnIkN$SabN9tPS679eJZG102usGxkEdA04Yu9ghSDbbWAG4z24QBbxohN/0G3CmdX8VKA9zSlCbBAkEsBXR6fSEQwDV0" # DefaultPassword123!
+        update_password: on_create
+      loop: "{{ users }}"
+
+    - name: Force password change on first login
+      ansible.builtin.shell: chage -d 0 {{ item.name }}
+      loop: "{{ users }}"
+      changed_when: false
+
+    - name: Create shared directories with specific permissions
+      ansible.builtin.file:
+        path: "{{ item.path }}"
+        state: directory
+        owner: "{{ item.owner }}"
+        group: "{{ item.group }}"
+        mode: "{{ item.mode }}"
+      loop: "{{ shared_dirs }}"
+
+    # 2. SSH Hardening
+    - name: Deploy hardened sshd_config
+      ansible.builtin.copy:
+        src: ../configs/sshd_config
+        dest: /etc/ssh/sshd_config
+        owner: root
+        group: root
+        mode: '0644'
+      notify: Restart SSH
+
+    - name: Create systemd socket override directory
+      ansible.builtin.file:
+        path: /etc/systemd/system/ssh.socket.d/
+        state: directory
+        mode: '0755'
+
+    - name: Configure SSH to listen on custom port via systemd socket
+      ansible.builtin.copy:
+        content: |
+          [Socket]
+          ListenStream=
+          ListenStream={{ ssh_port }}
+        dest: /etc/systemd/system/ssh.socket.d/listen.conf
+      notify: 
+        - Reload Systemd
+        - Restart SSH Socket
+
+    # 3. Firewall (UFW)
+    - name: Configure UFW defaults
+      community.general.ufw:
+        direction: "{{ item.direction }}"
+        policy: "{{ item.policy }}"
+      loop:
+        - { direction: 'incoming', policy: 'deny' }
+        - { direction: 'outgoing', policy: 'allow' }
+
+    - name: Allow essential ports
+      community.general.ufw:
+        rule: allow
+        port: "{{ item.port | string }}"
+        proto: tcp
+        comment: "{{ item.comment }}"
+      loop:
+        - { port: "{{ ssh_port }}", comment: 'SSH Custom Port' }
+        - { port: 80, comment: 'HTTP' }
+        - { port: 443, comment: 'HTTPS' }
+
+    - name: Enable UFW
+      community.general.ufw:
+        state: enabled
+
+    # 4. Fail2Ban
+    - name: Install Fail2Ban
+      ansible.builtin.apt:
+        name: fail2ban
+        state: present
+        update_cache: yes
+
+    - name: Deploy Fail2Ban jail configuration
+      ansible.builtin.copy:
+        src: ../configs/jail.local
+        dest: /etc/fail2ban/jail.local
+        mode: '0644'
+      notify: Restart Fail2Ban
+
+    # 5. Auditd
+    - name: Install Auditd
+      ansible.builtin.apt:
+        name: [ "auditd", "audispd-plugins" ]
+        state: present
+
+    - name: Deploy Auditd rules
+      ansible.builtin.copy:
+        src: ../configs/audit.rules
+        dest: /etc/audit/rules.d/hardening.rules
+        mode: '0600'
+      notify: Restart Auditd
+
+    # 6. Oh-My-Zsh Deployment
+    - name: Install Zsh, Git, Curl and ACL
+      ansible.builtin.apt:
+        name: [ "zsh", "git", "curl", "acl" ]
+        state: present
+
+    - name: Check if Oh-My-Zsh is installed for users
+      ansible.builtin.stat:
+        path: "/home/{{ item.name }}/.oh-my-zsh"
+      register: omz_stat
+      loop: "{{ users }}"
+
+    - name: Install Oh-My-Zsh for users
+      ansible.builtin.shell: |
+        sh -c "$(curl -fsSL https://raw.githubusercontent.com/ohmyzsh/ohmyzsh/master/tools/install.sh)" "" --unattended
+      become_user: "{{ item.item.name }}"
+      loop: "{{ omz_stat.results }}"
+      when: not item.stat.exists
+
+    - name: Deploy custom .zshrc template
+      ansible.builtin.copy:
+        src: ../configs/.zshrc-template
+        dest: "/home/{{ item.name }}/.zshrc"
+        owner: "{{ item.name }}"
+        group: "{{ item.name }}"
+        mode: '0644'
+      loop: "{{ users }}"
+
+  handlers:
+    - name: Reload Systemd
+      ansible.builtin.systemd:
+        daemon_reload: yes
+
+    - name: Restart SSH
+      ansible.builtin.service:
+        name: ssh
+        state: restarted
+
+    - name: Restart SSH Socket
+      ansible.builtin.service:
+        name: ssh.socket
+        state: restarted
+
+    - name: Restart Fail2Ban
+      ansible.builtin.service:
+        name: fail2ban
+        state: restarted
+
+    - name: Restart Auditd
+      ansible.builtin.service:
+        name: auditd
+        state: restarted
