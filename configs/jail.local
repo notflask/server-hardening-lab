@@ -1,0 +1,19 @@
+[DEFAULT]
+# Wie lange wird eine IP gesperrt? (in Sekunden)
+bantime  = 3600
+
+# Zeitfenster für fehlgeschlagene Versuche
+findtime = 600
+
+# Wie viele Fehlversuche erlaubt?
+maxretry = 5
+
+# Backend für Log-Parsing
+backend = systemd
+
+[sshd]
+enabled  = true
+port     = 2222
+logpath  = %(sshd_log)s
+maxretry = 3
+bantime  = 7200
